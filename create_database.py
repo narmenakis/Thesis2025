@@ -5,7 +5,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 # from langchain.embeddings import OpenAIEmbeddings
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
+# from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 import openai 
 from dotenv import load_dotenv
 import os
@@ -23,7 +24,7 @@ load_dotenv()
 
 openai.api_key = os.environ['OPENAI_API_KEY']
 CHROMA_PATH = "chroma"
-CSV_FILE_PATH = "/Users/narmen/CEID/Διπλωματική/app/source/output.csv"
+CSV_FILE_PATH = "/Users/narmen/CEID/Διπλωματική/thesis/source/output.csv"
 
 
 def main():
@@ -113,14 +114,14 @@ def add_to_chroma(chunks: list[Document]):
             chunk.metadata["id"] = chunk.metadata["id"]  
 
         db.add_documents(new_chunks, ids=new_chunk_ids)  # Ensure IDs are used
-        db.persist()  
+        # db.persist()  
         print("✅ New chunks added successfully!")
 
         # Debug: Print stored metadata
         stored_documents = db.get(include=["metadatas"])
-        print("🔍 Stored Documents Metadata in ChromaDB:")
-        for i, meta in enumerate(stored_documents["metadatas"][:10]):  
-            print(f"Document {i+1}: {meta}")
+        # print("🔍 Stored Documents Metadata in ChromaDB:")
+        # for i, meta in enumerate(stored_documents["metadatas"][:10]):  
+        #     print(f"Document {i+1}: {meta}")
 
     else:
         print("✅ No new chunks to add")
