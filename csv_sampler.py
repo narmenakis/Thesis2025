@@ -11,4 +11,4 @@ def filter_first_ten_entries_and_columns(input_csv, output_csv):
     filtered_df.to_csv(output_csv, index=False)
 
 # Example usage
-filter_first_ten_entries_and_columns("/Users/narmen/CEID/Διπλωματική/app_2/langchain-rag-tutorial/source/articles.csv", "/Users/narmen/CEID/Διπλωματική/app_2/langchain-rag-tutorial/source/output.csv")
+filter_first_ten_entries_and_columns("/Users/narmen/CEID/Διπλωματική/thesis/source/articles.csv", "/Users/narmen/CEID/Διπλωματική/thesis/source/output.csv")
