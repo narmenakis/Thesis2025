@@ -34,7 +34,7 @@ def main():
     args = parser.parse_args()
     query_text = args.query_text
 
-    # Prepare the DB.
+    # Prepare the DB. !!!
     embedding_function = OpenAIEmbeddings()
     db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embedding_function)
 
@@ -49,13 +49,22 @@ def main():
 #         print(f"Result {i + 1} metadata: {doc.metadata}")
 
     context_text = "\n\n---\n\n".join([
-    f"Title: {doc.metadata.get('title', 'Unknown Title')}\n"
+    f"URL: {doc.metadata.get('url', 'URL λείπει')}\n"
+    f"Τίτλος: {doc.metadata.get('title', 'Τίτλος λείπει')}\n"
     # f"ID: {doc.metadata.get('id', 'No ID')}\n"
-    f"Author: {doc.metadata.get('author', 'Unknown Author')}\n"
-    f"Link: {doc.metadata.get('link', 'No Link')}\n\n"
+    f"Ιστοσελίδα: {doc.metadata.get('website', 'Ιστοσελίδα λείπει')}\n"
+    f"Ημερομηνία: {doc.metadata.get('datetime', 'Ημερομηνία λείπει')}\n"
+    f"Στήλη: {doc.metadata.get('section', 'Στήλη λείπει')}\n\n"
     f"{doc.page_content}"
     for doc, _score in results
     ])
+
+                # "url": row["url"],
+                # "title": row["title"],  
+                # "author": row["author"],  
+                # "website": row["website"],  
+                # "datetime": row["datetime"],  
+                # "section": row["section"],
 
     prompt_template = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
     prompt = prompt_template.format(context=context_text, question=query_text)

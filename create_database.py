@@ -24,7 +24,7 @@ load_dotenv()
 
 openai.api_key = os.environ['OPENAI_API_KEY']
 CHROMA_PATH = "chroma"
-CSV_FILE_PATH = "/Users/narmen/CEID/Διπλωματική/thesis/source/output.csv"
+CSV_FILE_PATH = "/Users/narmen/CEID/Διπλωματική/thesis/source/output_2.csv"
 
 
 def main():
@@ -54,11 +54,17 @@ def load_documents():
 
     documents = [
         Document(
-            page_content=row["text"],  # The main article content
+            page_content=row["full-text"],  # The main article content
             metadata={
-                "author": row["author"],
-                "title": row["title"],
-                "link": row["link"],
+                "url": row["url"],
+                "title": row["title"],  
+                "author": row["author"],  
+                "website": row["website"],  
+                "datetime": row["datetime"],  
+                "section": row["section"],  
+                # "author": row["author"],
+                # "title": row["title"],
+                # "link": row["link"],
                 "row_index": index
             }
         )
@@ -122,7 +128,7 @@ def add_to_chroma(chunks: list[Document]):
         # print("🔍 Stored Documents Metadata in ChromaDB:")
         # for i, meta in enumerate(stored_documents["metadatas"][:10]):  
         #     print(f"Document {i+1}: {meta}")
-
+ 
     else:
         print("✅ No new chunks to add")
 
@@ -139,11 +145,11 @@ def calculate_chunk_ids(chunks):
     ## Chunk indexing !!!
     for chunk in chunks:
         # Extract metadata
-        link = chunk.metadata.get("link", "Unknown Link")
+        url = chunk.metadata.get("url", "Unknown URL")
         row_in_csv = chunk.metadata.get("row_index")
 
         # Create a unique row ID
-        current_row_id = f"{link}:{row_in_csv}"
+        current_row_id = f"{url}:{row_in_csv}"
 
         # Increment chunk index if it's the same row as the last one
         if current_row_id == last_row_id:
