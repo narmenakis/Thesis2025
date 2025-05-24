@@ -1,3 +1,4 @@
+# Debugging version
 import os
 import torch
 import torch.nn.functional as F
@@ -10,18 +11,18 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 from datetime import datetime
 
-# Disable CUDA memory caching to save GPU memory
+# Disable CUDA memory caching to save VRAM
 os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
-os.environ["STREAMLIT_WATCHER_TYPE"] = "none"
+os.environ["STREAMLIT_WATCHER_TYPE"] = "none" # Disable file watch reload in Streamlit
 
 # Fix PyTorch, Streamlit compatibility issue
 torch.classes.__path__ = [os.path.join(torch.__path__[0], torch.classes.__file__)]
 
 # Constants
-CHROMA_PATH = "chroma"
-device = "cuda" if torch.cuda.is_available() else "cpu"
-llm_model_name = "ilsp/Llama-Krikri-8B-Instruct"
-embedding_model_name = "intfloat/multilingual-e5-large-instruct"
+CHROMA_PATH = "chroma" # Local vector DB path
+device = "cuda" if torch.cuda.is_available() else "cpu" # Choose GPU if available
+llm_model_name = "ilsp/Llama-Krikri-8B-Instruct" # Greek Open Source LLM Krikri
+embedding_model_name = "intfloat/multilingual-e5-large-instruct" # Multilingual Instruct Embedding model
 
 class E5InstructEmbeddings:
     def __init__(self):
@@ -29,19 +30,27 @@ class E5InstructEmbeddings:
         self.tokenizer = AutoTokenizer.from_pretrained(embedding_model_name)
         self.model = AutoModel.from_pretrained(embedding_model_name).to(self.device)
         self.model.eval()
-        
+
+    # Computes the average embedding of non-padding tokens in the sequence,
+    # masking out padding using the attention mask.
     def average_pool(self, last_hidden_states: Tensor, attention_mask: Tensor) -> Tensor:
         last_hidden = last_hidden_states.masked_fill(~attention_mask[..., None].bool(), 0.0)
         return last_hidden.sum(dim=1) / attention_mask.sum(dim=1)[..., None]
     
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """Embed documents by adding 'passage: ' prefix"""
+        # Add 'passage: ' prefix
         instruction_texts = ["passage: " + text for text in texts]
         return self._embed(instruction_texts)
     
     def embed_query(self, text: str) -> List[float]:
-        """Embed query by adding proper instruction prefix"""
-        instruction_text = f'Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: {text}'
+        # Add 'Instruct: ' prefix
+        # instruction_text = f'Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: {text}' # default
+
+        # custom 
+        instruction_text = f'Instruct: Given a journalistic question, retrieve relevant passages from news articles that factually \
+        and clearly answer the question\n"Query: {text}'
+
+
         return self._embed([instruction_text])[0]
     
     def _embed(self, texts: List[str]) -> List[List[float]]:
@@ -62,6 +71,7 @@ class E5InstructEmbeddings:
             embeddings = F.normalize(embeddings, p=2, dim=1)
             return embeddings.cpu().tolist()
 
+# Cached loading of the language model and tokenizer
 @st.cache_resource
 def load_model_and_tokenizer():
     tokenizer = AutoTokenizer.from_pretrained(llm_model_name)
@@ -71,12 +81,13 @@ def load_model_and_tokenizer():
     )
     model.to(device)
     return tokenizer, model
-
+# Cached loading of the language model and tokenizer
 @st.cache_resource
 def load_vector_db():
     embedding_function = E5InstructEmbeddings()
     return Chroma(persist_directory=CHROMA_PATH, embedding_function=embedding_function)
 
+# Generate LLM output 
 def generate_with_krikri(tokenizer, model, system_prompt, user_prompt):
     messages = [
         {"role": "system", "content": system_prompt},
@@ -103,9 +114,11 @@ def generate_with_krikri(tokenizer, model, system_prompt, user_prompt):
 
     return decoded_output
 
+# Main query answering logic
 def answer_query(query_text, tokenizer, model, db, chat_history, author_filter, website_filter, section_filter, start_date, end_date, max_docs):
+    # Metadata filters
     filter_dict = {}
-
+    
     if section_filter:
         filter_dict["section"] = {"$in": section_filter}
     if author_filter:
@@ -120,20 +133,70 @@ def answer_query(query_text, tokenizer, model, db, chat_history, author_filter, 
             date_range["$lte"] = end_date.isoformat()
         filter_dict["datetime"] = date_range
 
+    # First retrieval (similarity search)
     results = db.similarity_search_with_relevance_scores(query_text, k=50, filter=filter_dict if filter_dict else None)
 
     if not results:
         return "❌ Δεν βρέθηκαν σχετικές πληροφορίες με τα επιλεγμένα φίλτρα.", "", []
 
+    # sort by relevance
     filtered_results = sorted(
-        [(doc, score) for doc, score in results if score >= 0.50],
+        [(doc, score) for doc, score in results if score >= 0.75],
         key=lambda x: x[1],
         reverse=True
     )[:max_docs]
+    
+
 
     if len(filtered_results) == 0:
         return "❌ Δεν βρέθηκαν σχετικές πληροφορίες.", "", []
 
+    # Get the most relevant document
+    most_relevant_doc, highest_score = filtered_results[0]
+    
+    # Generate a 5-word summary of the most relevant document
+    summary_prompt = (
+        "Παρακάτω είναι ένα άρθρο. Κάνε μια σύνοψη 5 λέξεων:\n\n"
+        f"{most_relevant_doc.page_content}"
+    )
+    
+    summary = generate_with_krikri(
+        tokenizer, 
+        model,
+        "Είσαι ένας βοηθός που δημιουργεί σύντομες συνοψήσεις 5 λέξεων.",
+        summary_prompt
+    )
+    
+    # Clean up the summary (remove quotes, special characters, etc.)
+    summary = summary.replace('"', '').replace("'", "").strip()
+    
+    # Create enhanced query with the original query and summary
+    enhanced_query = f"{query_text} [Σύνοψη σχετικού άρθρου: {summary}]"
+    print("summary:", summary)
+
+    # Second retrieval with the enhanced query
+    enhanced_results = db.similarity_search_with_relevance_scores(
+        enhanced_query, 
+        k=max_docs, 
+        filter=filter_dict if filter_dict else None
+    )
+    
+    # Choose best results (fallback to previous if necessary)
+    final_results = sorted(
+        [(doc, score) for doc, score in enhanced_results if score >= 0.85],
+        key=lambda x: x[1],
+        reverse=True
+    )[:max_docs] if enhanced_results else filtered_results
+
+    # Remove duplicate URLs (keep highest score) 
+    seen_urls = {}
+    for doc, score in final_results:
+        url = doc.metadata.get('url', 'URL λείπει')
+        if url not in seen_urls or score > seen_urls[url][1]:
+            seen_urls[url] = (doc, score)
+    final_results = list(seen_urls.values())
+
+    # Construct context for the final LLM generation
     context_text = "\n\n---\n\n".join([
         f"URL: {doc.metadata.get('url', 'URL λείπει')}\n"
         f"Τίτλος: {doc.metadata.get('title', 'Τίτλος λείπει')}\n"
@@ -141,9 +204,10 @@ def answer_query(query_text, tokenizer, model, db, chat_history, author_filter, 
         f"Ημερομηνία: {doc.metadata.get('datetime', 'Ημερομηνία λείπει')}\n"
         f"Στήλη: {doc.metadata.get('section', 'Στήλη λείπει')}\n\n"
         f"{doc.page_content}"
-        for doc, _ in filtered_results
+        for doc, _ in final_results
     ])
 
+    # Add conversation history
     conversation_history = ""
     for role, msg, _ in chat_history:
         role_prefix = "Χρήστης:" if role == "user" else "Βοηθός:"
@@ -153,7 +217,8 @@ def answer_query(query_text, tokenizer, model, db, chat_history, author_filter, 
 Συνομιλία μέχρι τώρα:
 {conversation_history}
 
-Βασισμένος ΜΟΝΟ στο παρακάτω κείμενο και στην Συνομιλία μέχρι τώρα, απάντησε στην ερώτηση:
+Βασισμένος ΜΟΝΟ στο παρακάτω κείμενο και στην Συνομιλία μέχρι τώρα, απάντησε στην ερώτηση.
+Σχετική σύνοψη: {summary}
 
 {context_text}
 
@@ -163,18 +228,20 @@ def answer_query(query_text, tokenizer, model, db, chat_history, author_filter, 
 """
 
     system_prompt = (
-        "Είσαι ένα ανεπτυγμένο μοντέλο Τεχνητής Νοημοσύνης ειδικά σχεδιασμένο για την Ελληνική γλώσσα. "
+        "Είσαι ένας έμπειρος δημοσιογραφικός βοηθός. "
         "Απαντάς σε ερωτήσεις δημοσιογραφικού ενδιαφέροντος με βάση διαθέσιμα άρθρα. "
         "Πρέπει να απαντάς με αντικειμενικότητα, ουδετερότητα και χωρίς εικασίες. "
         "ΜΗΝ προσθέτεις προσωπικές υποθέσεις ή πληροφορίες που δεν αναφέρονται ρητά στα κείμενα. "
         "Δώσε έμφαση στα άρθρα τα οποία σχετίζονται με τη Συνομιλία μέχρι τώρα. "
+        "Λάβε υπόψη τη σχετική σύνοψη που παρέχεται."
+        "Οι απαντήσεις σου να είναι αναλυτικές και περιεκτικές. "
     )
-
+    
     answer = generate_with_krikri(tokenizer, model, system_prompt, user_prompt)
     
     sources = [
         (doc.metadata.get('url', 'URL λείπει'), round(score, 2))
-        for doc, score in filtered_results
+        for doc, score in final_results
     ]
 
     return answer, context_text, sources
@@ -204,6 +271,7 @@ def main():
 
     max_docs = st.sidebar.slider("Μέγιστος αριθμός εγγράφων", min_value=1, max_value=20, value=10)
 
+    # Display past chat history
     for role, msg, sources in st.session_state.chat_history:
         with st.chat_message(role):
             st.write(msg)
@@ -212,13 +280,14 @@ def main():
                 for source in sources:
                     st.write(f"- {source}")
 
+    # Handle new user input
     user_question = st.chat_input("Ρώτα κάτι σχετικό με τα δεδομένα...")
     if user_question:
         with st.chat_message("user"):
             st.write(user_question)
         st.session_state.chat_history.append(("user", user_question, []))
-        if len(st.session_state.chat_history) > 30:
-            st.session_state.chat_history = st.session_state.chat_history[-30:]
+        if len(st.session_state.chat_history) > 50:
+            st.session_state.chat_history = st.session_state.chat_history[-50:]
 
         with st.spinner("💭 Σκέφτομαι..."):
             answer, context, urls = answer_query(
@@ -237,8 +306,8 @@ def main():
                         st.write(f"- **[{score}]** {url}")
 
         st.session_state.chat_history.append(("assistant", answer, urls))
-        if len(st.session_state.chat_history) > 30:
-            st.session_state.chat_history = st.session_state.chat_history[-30:]
+        if len(st.session_state.chat_history) > 50:
+            st.session_state.chat_history = st.session_state.chat_history[-50:]
 
 if __name__ == "__main__":
     main()

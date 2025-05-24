@@ -8,10 +8,10 @@ import pandas as pd
 from langchain_huggingface import HuggingFaceEmbeddings
 import torch
 
-# Simplified version - only handles document embeddings
+# Modify embedding function for instruct version
 class DocumentEmbedder(HuggingFaceEmbeddings):
     def embed_documents(self, texts):
-        """Only adds 'passage: ' prefix - no instructions needed"""
+        # Adds 'passage: ' prefix
         prefixed_texts = ["passage: " + text for text in texts]
         return super().embed_documents(prefixed_texts)
 
@@ -20,15 +20,16 @@ embedding_function = DocumentEmbedder(
     model_name="intfloat/multilingual-e5-large-instruct",
     model_kwargs={
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+        
     },
     encode_kwargs={
-        'batch_size': 256,  # Adjusted for typical GPU memory
+        'batch_size': 1024, # for embedder
         'normalize_embeddings': True  # Must include for E5 models
     }
 )
 
 CHROMA_PATH = "chroma"
-BATCH_SIZE = 256  # Reduced from original for stability
+BATCH_SIZE = 512 # for database
 
 def main():
     parser = argparse.ArgumentParser()
@@ -53,9 +54,9 @@ def generate_data_store():
 
 def load_documents():
     files = [
-        # ("kathimerini.gr.csv", "format1"),
+        ("kathimerini.gr.csv", "format1"),
         ("efsyn_politiki_01-05-2024_15-06-2024.csv", "format1"),
-        # ("skai.gr-MAY23.csv", "format2"),
+        ("skai.gr-MAY23.csv", "format2"),
         ("zougla.gr-MAY23.csv", "format2"),
     ]
 
@@ -100,7 +101,7 @@ def load_documents():
 
 def split_text(documents: list[Document]):
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,  # Slightly smaller than 512 to account for prefix
+        chunk_size=500,  # Due to embedding model limits
         chunk_overlap=100,
         length_function=len,
         separators=["\n\n", "\n", " ", ""]
