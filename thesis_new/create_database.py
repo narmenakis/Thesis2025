@@ -7,6 +7,7 @@ import shutil
 import pandas as pd
 from langchain_huggingface import HuggingFaceEmbeddings
 import torch
+from datetime import datetime
 
 # Modify embedding function for instruct version
 class DocumentEmbedder(HuggingFaceEmbeddings):
@@ -28,7 +29,7 @@ embedding_function = DocumentEmbedder(
     }
 )
 
-CHROMA_PATH = "chroma"
+CHROMA_PATH = "chroma_new"
 BATCH_SIZE = 512 # for database
 
 def main():
@@ -61,7 +62,7 @@ def load_documents():
     ]
 
     all_documents = []
-    
+
     for file_path, fmt in files:
         try:
             df = pd.read_csv(file_path)
@@ -73,25 +74,34 @@ def load_documents():
                     "text": "full-text"
                 })
 
-            documents = [
-                Document(
-                    page_content=row["full-text"],
-                    metadata={
-                        "url": row["url"],
-                        "title": row["title"],
-                        "author": row["author"] if pd.notna(row["author"]) else "",
-                        "website": row["website"],
-                        "datetime": row["datetime"] if pd.notna(row["datetime"]) else "",
-                        "section": row["section"] if pd.notna(row["section"]) else "",
-                        "row_index": index
-                    }
-                )
-                for index, row in df.iterrows()
-            ]
+            documents = []
+            for index, row in df.iterrows():
+                dt_string = row["datetime"] if pd.notna(row["datetime"]) else None
+                timestamp = None
+
+                if dt_string:
+                    try:
+                        # Adjust format if your date is different
+                        dt = datetime.strptime(dt_string, "%Y-%m-%d")
+                        timestamp = dt.timestamp()
+                    except Exception as e:
+                        print(f"⚠️ Invalid datetime '{dt_string}' in {file_path} row {index}: {e}")
+
+                metadata = {
+                    "url": row["url"],
+                    "title": row["title"],
+                    "author": row["author"] if pd.notna(row["author"]) else "",
+                    "website": row["website"],
+                    "datetime": timestamp if timestamp else 0,  # fallback or filter later
+                    "section": row["section"] if pd.notna(row["section"]) else "",
+                    "row_index": index
+                }
+
+                documents.append(Document(page_content=row["full-text"], metadata=metadata))
             
             print(f"📄 Loaded {len(documents)} documents from {file_path}")
             all_documents.extend(documents)
-            
+
         except Exception as e:
             print(f"❌ Error loading {file_path}: {str(e)}")
             continue
@@ -168,3 +178,4 @@ def clear_database():
 
 if __name__ == "__main__":
     main()
+    

@@ -12,5 +12,6 @@ bottleneck==1.3.6
 langchain-chroma==0.2.2
 streamlit==1.44.1
 transformers==4.51.1
+matplotlib==3.9
 
 # install markdown depenendies with: `pip install "unstructured[md]"` after install the requirements file. Leave this line commented out. 

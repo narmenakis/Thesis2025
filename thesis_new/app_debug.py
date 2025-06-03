@@ -7,9 +7,10 @@ from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
 from typing import List
 import streamlit as st
 from langchain_chroma import Chroma
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
-from datetime import datetime
+from datetime import datetime, date
+import time
+import json
+import re 
 
 # Disable CUDA memory caching to save VRAM
 os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
@@ -19,10 +20,20 @@ os.environ["STREAMLIT_WATCHER_TYPE"] = "none" # Disable file watch reload in Str
 torch.classes.__path__ = [os.path.join(torch.__path__[0], torch.classes.__file__)]
 
 # Constants
-CHROMA_PATH = "chroma" # Local vector DB path
+CHROMA_PATH = "chroma_new" # Local vector DB path
 device = "cuda" if torch.cuda.is_available() else "cpu" # Choose GPU if available
 llm_model_name = "ilsp/Llama-Krikri-8B-Instruct" # Greek Open Source LLM Krikri
 embedding_model_name = "intfloat/multilingual-e5-large-instruct" # Multilingual Instruct Embedding model
+SYSTEM_PROMPT = (
+    "Είσαι ένας έμπειρος δημοσιογραφικός βοηθός. "
+    "Απαντάς σε ερωτήσεις δημοσιογραφικού ενδιαφέροντος με βάση διαθέσιμα άρθρα. "
+    "Πρέπει να απαντάς με αντικειμενικότητα, ουδετερότητα και χωρίς εικασίες. "
+    "ΜΗΝ προσθέτεις προσωπικές υποθέσεις ή πληροφορίες που δεν αναφέρονται ρητά στα κείμενα. "
+    "Δώσε έμφαση στα άρθρα τα οποία σχετίζονται με τη Συνομιλία μέχρι τώρα. "
+    "Λάβε υπόψη τη σχετική σύνοψη που παρέχεται."
+    "Οι απαντήσεις σου να είναι αναλυτικές και περιεκτικές. "
+)
+MAX_CHAT_HISTORY = 40  # Limit chat history to last 50 messages (question+answer pairs)
 
 class E5InstructEmbeddings:
     def __init__(self):
@@ -80,12 +91,51 @@ def load_model_and_tokenizer():
         torch_dtype=torch.float16 if device == "cuda" else torch.float32
     )
     model.to(device)
+    
+    # If using GPU, compile the model for performance
+    if device == "cuda":
+        model = torch.compile(model)
+
+
     return tokenizer, model
 # Cached loading of the language model and tokenizer
 @st.cache_resource
 def load_vector_db():
     embedding_function = E5InstructEmbeddings()
     return Chroma(persist_directory=CHROMA_PATH, embedding_function=embedding_function)
+
+@st.cache_data
+def get_metadata_filters(_db):
+    metadatas = _db.get()['metadatas']
+    authors = sorted(set(meta.get("author") for meta in metadatas if meta.get("author")))
+    websites = sorted(set(meta.get("website") for meta in metadatas if meta.get("website")))
+    sections = sorted(set(meta.get("section") for meta in metadatas if meta.get("section")))
+    return authors, websites, sections
+
+# Function to log user interactions 
+def log_interaction(user_id: str, question: str, answer: str):
+    timestamp = datetime.now().isoformat()
+    log_entry = {
+        "user": user_id,
+        "timestamp": timestamp,
+        "question": question,
+        "answer": answer
+    }
+    with open("chat_logs.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+
+# Function to log metrics (timings and word count)
+def log_timings(user_id: str, question: str, timings: dict, word_count: int):
+    log_entry = {
+        "user": user_id,
+        "timestamp": datetime.now().isoformat(),
+        "question": question,
+        "timings": timings,
+        "word_count": word_count
+    }
+    with open("timings_log.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+
 
 # Generate LLM output 
 def generate_with_krikri(tokenizer, model, system_prompt, user_prompt):
@@ -114,47 +164,63 @@ def generate_with_krikri(tokenizer, model, system_prompt, user_prompt):
 
     return decoded_output
 
+def date_to_timestamp(date_obj):
+    return datetime.combine(date_obj, datetime.min.time()).timestamp()
+
 # Main query answering logic
 def answer_query(query_text, tokenizer, model, db, chat_history, author_filter, website_filter, section_filter, start_date, end_date, max_docs):
-    # Metadata filters
-    filter_dict = {}
-    
-    if section_filter:
-        filter_dict["section"] = {"$in": section_filter}
-    if author_filter:
-        filter_dict["author"] = {"$in": author_filter}
-    if website_filter:
-        filter_dict["website"] = {"$in": website_filter}
-    if start_date or end_date:
-        date_range = {}
-        if start_date:
-            date_range["$gte"] = start_date.isoformat()
-        if end_date:
-            date_range["$lte"] = end_date.isoformat()
-        filter_dict["datetime"] = date_range
+    timings = {}
+    total_start_time = time.time()
 
-    # First retrieval (similarity search)
-    results = db.similarity_search_with_relevance_scores(query_text, k=50, filter=filter_dict if filter_dict else None)
+    # Metadata filters
+    filter_clauses = []
+
+    if section_filter:
+        filter_clauses.append({"section": {"$in": section_filter}})
+    if author_filter:
+        cleaned_authors = [a.strip() for a in author_filter]
+        filter_clauses.append({"author": {"$in": cleaned_authors}})
+    if website_filter:
+        cleaned_websites = [w.strip() for w in website_filter]
+        filter_clauses.append({"website": {"$in": cleaned_websites}})
+    if start_date or end_date:
+        if start_date and end_date:
+            filter_clauses.append({
+                "$and": [
+                    {"datetime": {"$gte": date_to_timestamp(start_date)}},
+                    {"datetime": {"$lte": date_to_timestamp(end_date)}}
+                ]
+            })
+        elif start_date:
+            filter_clauses.append({"datetime": {"$gte": date_to_timestamp(start_date)}})
+        elif end_date:
+            filter_clauses.append({"datetime": {"$lte": date_to_timestamp(end_date)}})
+
+    filter_dict = {"$and": filter_clauses} if len(filter_clauses) > 1 else (filter_clauses[0] if filter_clauses else None)
+
+    # Start timing retrieval
+    start_retrieval_time = time.time()
+    results = db.similarity_search_with_relevance_scores(query_text, k=1, filter=filter_dict)
+    timings["retrieval_1"] = time.time() - start_retrieval_time
 
     if not results:
-        return "❌ Δεν βρέθηκαν σχετικές πληροφορίες με τα επιλεγμένα φίλτρα.", "", []
+        return "❌ Δεν βρέθηκαν σχετικές πληροφορίες με τα επιλεγμένα φίλτρα.", "", [], {}, 0
 
-    # sort by relevance
+
+    # Filter results
     filtered_results = sorted(
-        [(doc, score) for doc, score in results if score >= 0.75],
+        [(doc, score) for doc, score in results if score >= 0.85],
         key=lambda x: x[1],
         reverse=True
     )[:max_docs]
-    
-
 
     if len(filtered_results) == 0:
-        return "❌ Δεν βρέθηκαν σχετικές πληροφορίες.", "", []
+        return "❌ Δεν βρέθηκαν σχετικές πληροφορίες.", "", [], {}, 0
 
-    # Get the most relevant document
-    most_relevant_doc, highest_score = filtered_results[0]
+    most_relevant_doc, _ = filtered_results[0]
     
-    # Generate a 5-word summary of the most relevant document
+    # ⏱️ Start timing summary generation
+    start_generation_time = time.time()
     summary_prompt = (
         "Παρακάτω είναι ένα άρθρο. Κάνε μια σύνοψη 5 λέξεων:\n\n"
         f"{most_relevant_doc.page_content}"
@@ -166,29 +232,29 @@ def answer_query(query_text, tokenizer, model, db, chat_history, author_filter, 
         "Είσαι ένας βοηθός που δημιουργεί σύντομες συνοψήσεις 5 λέξεων.",
         summary_prompt
     )
-    
-    # Clean up the summary (remove quotes, special characters, etc.)
+
     summary = summary.replace('"', '').replace("'", "").strip()
-    
-    # Create enhanced query with the original query and summary
+    timings["summary_generation"] = time.time() - start_generation_time
+
+    # Second retrieval with enhanced query
     enhanced_query = f"{query_text} [Σύνοψη σχετικού άρθρου: {summary}]"
     print("summary:", summary)
 
-    # Second retrieval with the enhanced query
+    start_retrieval2_time = time.time()
     enhanced_results = db.similarity_search_with_relevance_scores(
         enhanced_query, 
         k=max_docs, 
         filter=filter_dict if filter_dict else None
     )
-    
-    # Choose best results (fallback to previous if necessary)
+    timings["retrieval_2"] = time.time() - start_retrieval2_time
+
     final_results = sorted(
         [(doc, score) for doc, score in enhanced_results if score >= 0.85],
         key=lambda x: x[1],
         reverse=True
     )[:max_docs] if enhanced_results else filtered_results
 
-    # Remove duplicate URLs (keep highest score) 
+    # Remove duplicate URLs
     seen_urls = {}
     for doc, score in final_results:
         url = doc.metadata.get('url', 'URL λείπει')
@@ -196,7 +262,6 @@ def answer_query(query_text, tokenizer, model, db, chat_history, author_filter, 
             seen_urls[url] = (doc, score)
     final_results = list(seen_urls.values())
 
-    # Construct context for the final LLM generation
     context_text = "\n\n---\n\n".join([
         f"URL: {doc.metadata.get('url', 'URL λείπει')}\n"
         f"Τίτλος: {doc.metadata.get('title', 'Τίτλος λείπει')}\n"
@@ -207,7 +272,6 @@ def answer_query(query_text, tokenizer, model, db, chat_history, author_filter, 
         for doc, _ in final_results
     ])
 
-    # Add conversation history
     conversation_history = ""
     for role, msg, _ in chat_history:
         role_prefix = "Χρήστης:" if role == "user" else "Βοηθός:"
@@ -227,49 +291,65 @@ def answer_query(query_text, tokenizer, model, db, chat_history, author_filter, 
 Ερώτηση: {query_text}
 """
 
-    system_prompt = (
-        "Είσαι ένας έμπειρος δημοσιογραφικός βοηθός. "
-        "Απαντάς σε ερωτήσεις δημοσιογραφικού ενδιαφέροντος με βάση διαθέσιμα άρθρα. "
-        "Πρέπει να απαντάς με αντικειμενικότητα, ουδετερότητα και χωρίς εικασίες. "
-        "ΜΗΝ προσθέτεις προσωπικές υποθέσεις ή πληροφορίες που δεν αναφέρονται ρητά στα κείμενα. "
-        "Δώσε έμφαση στα άρθρα τα οποία σχετίζονται με τη Συνομιλία μέχρι τώρα. "
-        "Λάβε υπόψη τη σχετική σύνοψη που παρέχεται."
-        "Οι απαντήσεις σου να είναι αναλυτικές και περιεκτικές. "
-    )
-    
+    system_prompt = SYSTEM_PROMPT
+
+    # Final answer generation
+    start_answer_gen_time = time.time()
     answer = generate_with_krikri(tokenizer, model, system_prompt, user_prompt)
-    
+    timings["answer_generation"] = time.time() - start_answer_gen_time
+
+    timings["total_time"] = time.time() - total_start_time
+
+    # Output timings to console
+    print("\n⏱️ Timing Stats:")
+    for stage, duration in timings.items():
+        print(f" - {stage}: {duration:.2f} seconds")
+    word_count = len(answer.split())
+    print(f" - word_count: {word_count} words")
+
     sources = [
         (doc.metadata.get('url', 'URL λείπει'), round(score, 2))
         for doc, score in final_results
     ]
 
-    return answer, context_text, sources
-
+    return answer, context_text, sources, timings, word_count
+ 
 def main():
-    st.set_page_config(page_title="Krikri Chatbot", page_icon="🤖")
-    st.title("💬 Krikri Chatbot για Ελληνικά Κείμενα")
-
+    st.set_page_config(page_title="Greek Journalism RAG Chatbot", page_icon="🤖")
     tokenizer, model = load_model_and_tokenizer()
     db = load_vector_db()
 
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
+    all_authors, all_websites, all_sections = get_metadata_filters(db)
+
+    if "user_id" not in st.session_state or not st.session_state.user_id:
+        st.title("Καλώς ήρθες στο Greek Journalism RAG Chatbot! 💬")
+        email_input = st.text_input("Παρακαλώ γράψε το email σου για να συνεχίσεις:")
+
+        if st.button("Υποβολή"):
+            # check email pattern w/ regex
+            email_pattern = r"^[\w\.-]+@[\w\.-]+\.\w+$"
+            if re.match(email_pattern, email_input.strip()):
+                st.session_state.user_id = email_input.strip()
+                st.rerun() 
+            else:
+                st.error("Παρακαλώ εισάγετε ένα έγκυρο email.")
+        return
+
+    st.title("Greek Journalism RAG Chatbot 💬")
+    st.sidebar.markdown(f"### Συνδεδεμένος ως:\n**{st.session_state.user_id}**")
     # Sidebar filters
     st.sidebar.header("📊 Φίλτρα")
-    all_metadata = db.get()['metadatas']
-    all_authors = sorted(set(meta.get("author") for meta in all_metadata if meta.get("author")))
-    all_websites = sorted(set(meta.get("website") for meta in all_metadata if meta.get("website")))
-    all_sections = sorted(set(meta.get("section") for meta in all_metadata if meta.get("section")))
-
+    
     author_filter = st.sidebar.multiselect("Συγγραφέας", options=all_authors)
     website_filter = st.sidebar.multiselect("Ιστοσελίδα", options=all_websites)
     section_filter = st.sidebar.multiselect("Στήλη", options=all_sections)
     start_date = st.sidebar.date_input("Από Ημερομηνία", value=None)
     end_date = st.sidebar.date_input("Έως Ημερομηνία", value=None)
 
-    max_docs = st.sidebar.slider("Μέγιστος αριθμός εγγράφων", min_value=1, max_value=20, value=10)
+    max_docs = st.sidebar.slider("Μέγιστος αριθμός πηγών", min_value=1, max_value=20, value=10)
 
     # Display past chat history
     for role, msg, sources in st.session_state.chat_history:
@@ -281,17 +361,15 @@ def main():
                     st.write(f"- {source}")
 
     # Handle new user input
-    user_question = st.chat_input("Ρώτα κάτι σχετικό με τα δεδομένα...")
+    user_question = st.chat_input("Ρώτα κάτι σχετικό με τα δημοσιεύματα...")
     if user_question:
         with st.chat_message("user"):
             st.write(user_question)
         st.session_state.chat_history.append(("user", user_question, []))
-        if len(st.session_state.chat_history) > 50:
-            st.session_state.chat_history = st.session_state.chat_history[-50:]
 
         with st.spinner("💭 Σκέφτομαι..."):
-            answer, context, urls = answer_query(
-                user_question, tokenizer, model, db, st.session_state.chat_history,
+            answer, context, urls, timings, word_count = answer_query(
+                user_question, tokenizer, model, db, st.session_state.chat_history[-MAX_CHAT_HISTORY:],  # trimmed chat_history
                 author_filter, website_filter, section_filter,
                 start_date if start_date else None,
                 end_date if end_date else None,
@@ -306,8 +384,11 @@ def main():
                         st.write(f"- **[{score}]** {url}")
 
         st.session_state.chat_history.append(("assistant", answer, urls))
-        if len(st.session_state.chat_history) > 50:
-            st.session_state.chat_history = st.session_state.chat_history[-50:]
-
+        
+        user_id = st.session_state.get("user_id")
+        if user_id:
+            log_interaction(user_id, user_question, answer)
+            log_timings(user_id, user_question, timings, word_count)
+        
 if __name__ == "__main__":
     main()
